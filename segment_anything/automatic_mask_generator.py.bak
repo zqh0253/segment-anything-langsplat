@@ -160,10 +160,13 @@ class SamAutomaticMaskGenerator:
         """
 
         # Generate masks
-        mask_data_l = self._generate_masks(image)
+        mask_data, mask_data_s, mask_data_m, mask_data_l = self._generate_masks(image)
 
+        curr_anns = self.generate_curr_anns(mask_data)
+        curr_anns_s = self.generate_curr_anns(mask_data_s)
+        curr_anns_m = self.generate_curr_anns(mask_data_m)
         curr_anns_l = self.generate_curr_anns(mask_data_l)
-        return curr_anns_l
+        return curr_anns, curr_anns_s, curr_anns_m, curr_anns_l
 
 
     def generate_curr_anns(
@@ -211,12 +214,19 @@ class SamAutomaticMaskGenerator:
         )
 
         # Iterate over image crops
-        data_l = MaskData()
+        data = MaskData()
+        data_s, data_m, data_l = MaskData(), MaskData(), MaskData()
         for crop_box, layer_idx in zip(crop_boxes, layer_idxs):
-            crop_data_l = self._process_crop(image, crop_box, layer_idx, orig_size)
+            crop_data, crop_data_s, crop_data_m, crop_data_l = self._process_crop(image, crop_box, layer_idx, orig_size)
+            data.cat(crop_data)
+            data_s.cat(crop_data_s)
+            data_m.cat(crop_data_m)
             data_l.cat(crop_data_l)
+        data = self._generate_masks_data(data, crop_boxes)
+        data_s = self._generate_masks_data(data_s, crop_boxes)
+        data_m = self._generate_masks_data(data_m, crop_boxes)
         data_l = self._generate_masks_data(data_l, crop_boxes)
-        return data_l
+        return data, data_s, data_m, data_l
 
 
     def _generate_masks_data(
@@ -260,14 +270,21 @@ class SamAutomaticMaskGenerator:
         points_for_image = self.point_grids[crop_layer_idx] * points_scale
 
         # Generate masks for this crop in batches
-        data_l = MaskData()
+        data = MaskData()
+        data_s, data_m, data_l = MaskData(), MaskData(), MaskData()
         for (points,) in batch_iterator(self.points_per_batch, points_for_image):
-            batch_data_l = self._process_batch(points, cropped_im_size, crop_box, orig_size)
+            batch_data, batch_data_s, batch_data_m, batch_data_l = self._process_batch(points, cropped_im_size, crop_box, orig_size)
+            data.cat(batch_data)
+            data_s.cat(batch_data_s)
+            data_m.cat(batch_data_m)
             data_l.cat(batch_data_l)
-            del batch_data_l
+            del batch_data, batch_data_s, batch_data_m, batch_data_l
         self.predictor.reset_image()
+        data = self._process_crop_data(data, crop_box)
+        data_s = self._process_crop_data(data_s, crop_box)
+        data_m = self._process_crop_data(data_m, crop_box)
         data_l = self._process_crop_data(data_l, crop_box)
-        return data_l
+        return data, data_s, data_m, data_l
 
 
     def _process_crop_data(
@@ -320,15 +337,33 @@ class SamAutomaticMaskGenerator:
         # print(iou_preds.shape)torch.Size([64, 3])
         # Serialize predictions and store in MaskData
         # mask type: s m l
+        data_s = MaskData(
+            masks=masks[:,0,:,:],
+            iou_preds=iou_preds[:,0],
+            points=torch.as_tensor(points),
+        )
+        data_m = MaskData(
+            masks=masks[:,1,:,:],
+            iou_preds=iou_preds[:,1],
+            points=torch.as_tensor(points),
+        )
         data_l = MaskData(
             masks=masks[:,2,:,:],
             iou_preds=iou_preds[:,2],
             points=torch.as_tensor(points),
         )
+        data = MaskData(
+            masks=masks.flatten(0, 1),
+            iou_preds=iou_preds.flatten(0, 1),
+            points=torch.as_tensor(points.repeat(masks.shape[1], axis=0)),
+        )
         del masks
 
+        data = self._process_batch_data(data, crop_box, orig_w, orig_h)
+        data_s = self._process_batch_data(data_s, crop_box, orig_w, orig_h)
+        data_m = self._process_batch_data(data_m, crop_box, orig_w, orig_h)
         data_l = self._process_batch_data(data_l, crop_box, orig_w, orig_h)
-        return data_l
+        return data, data_s, data_m, data_l
     
     def _process_batch_data(
             self,
